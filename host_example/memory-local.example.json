@@ -1,0 +1,8 @@
+{
+  "source": "source",
+  "manifest": "allow.json",
+  "state": "state",
+  "model_url": "http://127.0.0.1:11434/v1",
+  "cue_model": "replace-with-local-chat-model",
+  "embedding_model": "replace-with-local-embedding-model"
+}
