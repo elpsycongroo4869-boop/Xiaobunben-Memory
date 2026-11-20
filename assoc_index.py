@@ -15,10 +15,11 @@ import sqlite3
 import time
 import asyncio
 import threading
-import fcntl
 import numpy as np
 from assoc_budget import reserve
 from collections import Counter
+from contextlib import closing
+from index_lock import try_lock
 from self_anchor import is_self_anchor_bucket
 from typing import Any
 
@@ -119,7 +120,7 @@ class AssocIndex:
         return conn
 
     def _init_db(self) -> None:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("""CREATE TABLE IF NOT EXISTS assoc_cues (
                 cue_id TEXT PRIMARY KEY, moment_id TEXT NOT NULL, bucket_id TEXT NOT NULL,
@@ -227,7 +228,7 @@ class AssocIndex:
         if expected_revision and expected_revision != version:
             return None
         selected_quote = str(quote or "").strip()
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             rows = conn.execute("""SELECT c.quote, p.plan_state, p.plan_quote, p.outcome_state, p.outcome_quote,
                        p.outcome_moment_id, p.outcome_revision FROM assoc_cues c
                        LEFT JOIN assoc_plans p ON p.cue_id=c.cue_id AND p.evidence_version=c.evidence_version
@@ -391,9 +392,7 @@ class AssocIndex:
     async def rebuild(self, limit: int, bucket_ids=None):
         # Only one indexer per state directory, including the standalone CLI.
         with open(self.db_path+".index.lock","a") as lock:
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX|fcntl.LOCK_NB)
-            except BlockingIOError:
+            if not try_lock(lock):
                 return {"busy":True,"complete":False,"failed":0,"indexed":0}
             return await self._rebuild(limit,bucket_ids)
 
@@ -408,7 +407,7 @@ class AssocIndex:
         buckets = {key: bucket for key, bucket in buckets.items() if not any(
             str(ref).isdigit() and int(ref) in retired
             for ref in (bucket.get("metadata") or {}).get("source_raw_event_ids", ()) or ())}
-        with self._connect() as db:
+        with closing(self._connect()) as db:
             states=dict(db.execute("SELECT moment_id,evidence_version FROM assoc_state"))
         counters={"scanned":len(moments),"indexed":0,"unchanged":0,"ineligible":0,"failed":0,"stale_removed":0,"complete":True}
         pending=[]
@@ -458,12 +457,16 @@ class AssocIndex:
         return counters
 
     def _remove_stale(self, stale):
-        with self._connect() as db:
-            db.executemany("DELETE FROM assoc_cues WHERE moment_id=?",[(mid,) for mid in stale])
-            db.executemany("DELETE FROM assoc_state WHERE moment_id=?",[(mid,) for mid in stale])
+        rows = [(mid,) for mid in stale]
+        with closing(self._connect()) as db, db:
+            db.executemany("DELETE FROM assoc_cues WHERE moment_id=?", rows)
+            db.executemany("DELETE FROM assoc_plans WHERE moment_id=?", rows)
+            db.executemany("""UPDATE assoc_plans SET outcome_state='unknown', outcome_quote='',
+                outcome_moment_id='', outcome_revision='', review_sig='' WHERE outcome_moment_id=?""", rows)
+            db.executemany("DELETE FROM assoc_state WHERE moment_id=?", rows)
 
     def _store_indexed(self, mid, version, staged):
-        with self._connect() as db:
+        with closing(self._connect()) as db, db:
             db.execute("DELETE FROM assoc_cues WHERE moment_id=?",(mid,))
             db.execute("DELETE FROM assoc_plans WHERE moment_id=?",(mid,))
             db.executemany("INSERT OR REPLACE INTO assoc_cues VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -476,7 +479,7 @@ class AssocIndex:
     def _load_features(self):
         # The published tuple is immutable. A refresh pulls vector payloads only
         # for new cue IDs; retirements disappear with the next atomic swap.
-        with self._cache_lock, self._connect() as db:
+        with self._cache_lock, closing(self._connect()) as db, db:
             db.execute("BEGIN")
             marker=tuple(db.execute("SELECT count(*),max(indexed_at) FROM assoc_state").fetchone())
             if self._cache and self._cache[0]==marker:

@@ -12,6 +12,7 @@ import os
 import secrets
 import sqlite3
 import time
+from contextlib import closing
 from typing import Any
 
 SCHEMA_VERSION = "assoc.v1"
@@ -81,7 +82,7 @@ class AssociativeRecall:
         return db
 
     def _init_db(self) -> None:
-        with self._db() as db:
+        with closing(self._db()) as db:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS selections (
                     selection_token TEXT PRIMARY KEY,
@@ -297,7 +298,7 @@ class AssociativeRecall:
             if not assistant_ids:
                 return False
             placeholders = ",".join("?" for _ in assistant_ids)
-            with self._db() as db:
+            with closing(self._db()) as db:
                 row = db.execute(
                     "SELECT 1 FROM selections WHERE session_id=? AND event_id=? "
                     "AND outcome='mentioned' AND assistant_message_id IN (" + placeholders + ") LIMIT 1",
@@ -306,7 +307,7 @@ class AssociativeRecall:
             return row is not None
         # Older gateways do not send active-path turn IDs. Keep their existing
         # receipt-expiry fallback until they are upgraded.
-        with self._db() as db:
+        with closing(self._db()) as db:
             rows = db.execute(
                 "SELECT 1 FROM selections WHERE session_id=? AND event_id=? "
                 "AND outcome='mentioned' AND expires_at>? ORDER BY rowid DESC LIMIT 6",
@@ -316,7 +317,7 @@ class AssociativeRecall:
 
     def _reserve(self, scope: dict[str, str], candidate: dict) -> str:
         token = secrets.token_urlsafe(24)
-        with self._db(timeout=0) as db:
+        with closing(self._db(timeout=0)) as db, db:
             db.execute("DELETE FROM selections WHERE expires_at<? AND outcome IS NULL", (time.time(),))
             db.execute(
                 "INSERT INTO selections(selection_token,session_id,branch_id,request_id,event_id,"
@@ -351,7 +352,7 @@ class AssociativeRecall:
                 token = candidate["selection_token"]
                 if row.get("excerpt") != candidate["excerpt"] or row.get("event_id") != candidate["event_id"]:
                     continue
-                with self._db(timeout=0) as db:
+                with closing(self._db(timeout=0)) as db:
                     reserved = db.execute(
                         "SELECT 1 FROM selections WHERE selection_token=? AND session_id=? AND branch_id=? "
                         "AND request_id=? AND candidate_id=? AND event_id=? AND evidence_version=? "
@@ -484,7 +485,7 @@ class AssociativeRecall:
             return {"schema_version": SCHEMA_VERSION, "status": "ignored"}
         scope = _scope(body)
         if scope is None: return {"schema_version":SCHEMA_VERSION,"status":"invalid"}
-        with self._db() as db:
+        with closing(self._db()) as db, db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT * FROM selections WHERE selection_token=? AND expires_at>?",
                              (token, time.time())).fetchone()

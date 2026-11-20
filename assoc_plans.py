@@ -5,10 +5,11 @@ import hashlib
 import json
 import asyncio
 import logging
-import fcntl
 import re
 import sqlite3
 from collections import defaultdict
+from contextlib import closing
+from index_lock import try_lock
 
 
 _STATES = {"completed", "cancelled", "rescheduled"}
@@ -35,7 +36,7 @@ def _date(index, moment, bucket):
 
 
 def _load_review_rows(index):
-    with index._connect() as conn:
+    with closing(index._connect()) as conn, conn:
         conn.execute("""CREATE TABLE IF NOT EXISTS assoc_plans (
             cue_id TEXT PRIMARY KEY, moment_id TEXT, evidence_version TEXT,
             plan_state TEXT, plan_quote TEXT, outcome_state TEXT, outcome_quote TEXT,
@@ -253,7 +254,7 @@ def _commit(index, item, result, graph):
             fresh, fresh_bucket = source["moment"], source["bucket"]
         if not _quote_window(index, fresh, fresh_bucket, result["outcome_quote"]):
             return False
-    with index._connect() as conn:
+    with closing(index._connect()) as conn, conn:
         # A completed model review should retry from fresh sources if the writer is busy.
         conn.execute("PRAGMA busy_timeout=0")
         conn.execute("BEGIN IMMEDIATE")
@@ -285,8 +286,8 @@ def _commit(index, item, result, graph):
 async def refresh_plan_states(index, limit=24, *, repair_unknown_ids=None):
     """With explicit cue IDs, revisit only their legacy unknown decisions, once per revision."""
     with open(str(index.db_path)+".plans.lock","a") as lock:
-        try: fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        except BlockingIOError: return {"busy":True,"reviewed":0,"failed":0}
+        if not try_lock(lock):
+            return {"busy":True,"reviewed":0,"failed":0}
         return await _refresh(index, max(0, int(limit)),
                               None if repair_unknown_ids is None else set(repair_unknown_ids))
 
@@ -344,7 +345,7 @@ def _invalidate_lost_links(index, batch):
         if any(s["moment_id"] == old["outcome_moment_id"] and s["revision"] == old["outcome_revision"]
                for s in item["later"]):
             continue
-        with index._connect() as db:
+        with closing(index._connect()) as db, db:
             db.execute("PRAGMA busy_timeout=0")
             changed = db.execute("""UPDATE assoc_plans SET outcome_state='unknown', outcome_quote='',
                 outcome_moment_id='', outcome_revision='', review_sig='' WHERE cue_id=:cue_id
