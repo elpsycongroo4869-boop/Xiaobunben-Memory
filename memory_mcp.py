@@ -65,8 +65,9 @@ def build_server(index, *, demo=False):
 
 
 async def serve(memory, state, client, cue_model, embedding_model, *, demo=False, demo_http=None):
+    embeddings = EmbeddingEngine(client, embedding_model) if embedding_model else None
     async with open_markdown_service(memory, state_dir=state,
-                                    embeddings=EmbeddingEngine(client, embedding_model),
+                                    embeddings=embeddings,
                                     model=RecallModel(client, cue_model)) as (index, _):
         report = await index.rebuild(limit=12)
         if report.get("failed"):
@@ -96,7 +97,7 @@ async def run(args):
         root = Path(directory)
         source, manifest = write_demo(root)
         memory = MarkdownMemory(source, args.demo_manifest if args.demo_manifest is not None else manifest)
-        await serve(memory, root / "state", DemoClient(), "demo-cues", "demo-vectors",
+        await serve(memory, root / "state", DemoClient(), "demo-cues", None,
                     demo=True, demo_http=args.demo_http)
 
 

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from assoc_index import AssocIndex
+from assoc_index import AssocIndex, _literal_matches
 from embedding_engine import EmbeddingEngine
 
 
@@ -23,6 +23,10 @@ class _BatchClient:
 
 
 class AssocDirectionTests(unittest.TestCase):
+    def test_literal_equality_precedes_containment_and_respects_word_boundaries(self):
+        rows = [{"quote": "Support request"}, {"quote": "Port confirmed"}, {"quote": "PORT."}]
+        self.assertEqual(_literal_matches("「Ｐｏｒｔ」", rows), [rows[2], rows[1]])
+
     def test_round_robin_keeps_each_semantic_direction_and_lexical_arm(self):
         rows = [
             {"bucket_id": "a", "cue_text": "a"},

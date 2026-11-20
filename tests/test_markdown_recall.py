@@ -25,6 +25,7 @@ class FixtureProvider:
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self.complete))
         self.embeddings = SimpleNamespace(create=self.embed)
         self.sources = []
+        self.queries = []
 
     async def complete(self, *, messages, **options):
         prompt = messages[-1]["content"]
@@ -45,6 +46,8 @@ class FixtureProvider:
 
     async def embed(self, *, input, **options):
         texts = [input] if isinstance(input, str) else input
+        if isinstance(input, list):
+            self.queries.extend(input)
         vectors = [[1.0, 0.0] if text in (CUE, QUERY) else [0.0, 1.0] for text in texts]
         return SimpleNamespace(data=[SimpleNamespace(index=i, embedding=v) for i, v in enumerate(vectors)])
 
@@ -153,3 +156,22 @@ class MarkdownRecallTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             async with self.service(self.source / "state"):
                 self.fail("opened state inside the Markdown directory")
+
+    async def test_literal_quote_beats_conflicting_vector_and_respects_revocation(self):
+        async with self.service() as (index, _):
+            self.assertEqual((await index.rebuild(limit=12))["indexed"], 2)
+            await index.warm()
+
+            query = f"「{QUOTE.rstrip('。')}」"
+            hits = await index.search([query], limit=2, vector=[0.0, 1.0])
+            self.assertEqual([row["excerpt"] for row in hits], [QUOTE, DISTRACTOR])
+            source = await self.memory.get(hits[0]["event_id"])
+            self.assertEqual(source["metadata"]["origin"], "night.md")
+            self.assertIn(hits[0]["excerpt"], source["content"])
+            self.assertEqual(await index.search([query], limit=1), hits[:1])
+            self.assertEqual(self.provider.queries, [])
+
+            self.grant("recipe.md")
+            remaining, = await index.search([query], limit=1, vector=[0.0, 1.0])
+            self.assertEqual(remaining["excerpt"], DISTRACTOR)
+            self.assertNotEqual(remaining["event_id"], hits[0]["event_id"])

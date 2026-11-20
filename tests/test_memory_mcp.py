@@ -1,5 +1,6 @@
 """Exercise the real MCP stdio server process with a changing demo allowlist."""
 import asyncio
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -48,11 +49,15 @@ class MemoryMcpTests(unittest.IsolatedAsyncioTestCase):
                     self.assertFalse(result.is_error)
                     return result.structured_content["matches"]
 
-                hit, = await query(QUERY)
+                hit, = await query(QUOTE.rstrip("。"))
                 self.assertEqual(set(hit), {"source_id", "excerpt", "evidence_version"})
                 self.assertEqual(hit["excerpt"], QUOTE)
-                self.assertRegex(hit["source_id"], r"^md-[0-9a-f]{24}$")
+                self.assertEqual(hit["source_id"], "md-" + hashlib.sha256(b"night.md").hexdigest()[:24])
                 self.assertRegex(hit["evidence_version"], r"^[0-9a-f]{64}$")
+                keyword_hit, = await query("柚子冻")
+                self.assertEqual(keyword_hit["excerpt"], DISTRACTOR)
+                self.assertEqual(keyword_hit["source_id"], "md-" + hashlib.sha256(b"recipe.md").hexdigest()[:24])
+                self.assertEqual(await query(QUERY), [keyword_hit])
                 self.assertEqual(await query("行星齿轮润滑参数"), [])
                 invalid = await client.call_tool(tool.name, {"query": "x" * 501})
                 self.assertTrue(invalid.is_error)
@@ -60,9 +65,8 @@ class MemoryMcpTests(unittest.IsolatedAsyncioTestCase):
                 replacement = manifest.with_suffix(".tmp")
                 replacement.write_text(json.dumps({"files": ["recipe.md"]}), encoding="utf-8")
                 replacement.replace(manifest)
-                next_hit, = await query(QUERY)
-                self.assertEqual(next_hit["excerpt"], DISTRACTOR)
-                self.assertNotEqual(hit["source_id"], next_hit["source_id"])
+                self.assertEqual(await query(QUOTE), [])
+                self.assertEqual(await query(QUERY), [keyword_hit])
                 manifest.write_text("{", encoding="utf-8")
                 self.assertEqual(await query(QUERY), [])
 
@@ -94,7 +98,7 @@ class MemoryMcpTests(unittest.IsolatedAsyncioTestCase):
                             tool, = (await client.list_tools()).tools
                             result = await client.call_tool(tool.name, {"query": QUERY})
                             match, = result.structured_content["matches"]
-                            self.assertEqual(match["excerpt"], QUOTE)
+                            self.assertEqual(match["excerpt"], DISTRACTOR)
             finally:
                 if process.returncode is None:
                     process.terminate()

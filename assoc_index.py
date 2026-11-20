@@ -15,6 +15,7 @@ import sqlite3
 import time
 import asyncio
 import threading
+import unicodedata
 import numpy as np
 from assoc_budget import reserve
 from collections import Counter
@@ -83,6 +84,29 @@ def _tokens(text: str) -> list[str]:
     return [term for w in words for term in
             ([w[i:i+2] for i in range(len(w)-1)] if re.search(r"[\u3400-\u9fff]", w) else [w])
             if term not in _STOP]
+
+
+def _literal_text(text: str) -> str:
+    normalized = unicodedata.normalize("NFKC", text).casefold()
+    return " ".join(normalized.split()).strip(" \"'“”‘’「」『』。.!?,，、;；:：")
+
+
+def _literal_matches(text: str, rows: list[dict]) -> list[dict]:
+    query = _literal_text(text)
+    if not _tokens(query):
+        return []
+    # Bound Latin words and numbers without requiring spaces around Chinese terms.
+    left = r"(?<![a-z0-9_])" if re.match(r"[a-z0-9_]", query) else ""
+    right = r"(?![a-z0-9_])" if re.search(r"[a-z0-9_]$", query) else ""
+    pattern = re.compile(left + re.escape(query) + right)
+    equal, contained = [], []
+    for row in rows:
+        quote = _literal_text(row["quote"])
+        if quote == query:
+            equal.append(row)
+        elif pattern.search(quote):
+            contained.append(row)
+    return equal + contained
 
 
 
@@ -567,6 +591,23 @@ class AssocIndex:
     async def search(self,texts,limit=12,*,vector=None,allow_embed=True):
         texts=[str(t).strip()[:2000] for t in texts if str(t).strip()][:4]
         if not texts or limit<1:return []
+
+        published = self._cache
+        refreshing = self.warm()
+        if published is None:
+            if not allow_embed:
+                return []
+            features = await asyncio.shield(refreshing)
+        else:
+            features = published[1:]
+
+        out = []
+        if len(texts) == 1:
+            literal = await asyncio.to_thread(_literal_matches, texts[0], features[0])
+            await self._collect_verified(literal, out, limit)
+            if len(out) >= limit:
+                return out
+
         vectors=[_finite_vector(vector)] if vector is not None else []
         if vector is None and allow_embed and getattr(self.embedding_engine,"enabled",False):
             # Reserve using the exact prepared strings sent to the provider, including
@@ -592,18 +633,19 @@ class AssocIndex:
                 logger.warning("Associative query embedding batch failed: %s",type(exc).__name__)
                 vectors=[]
             vectors=[_finite_vector(item) for item in (vectors or [])]
-        published=self._cache
-        refreshing=self.warm()
-        if published is None:
-            if not allow_embed:return []
-            features=await asyncio.shield(refreshing)
-        else:
-            features=published[1:]
         ranked=await asyncio.to_thread(self._rank_directions,texts,vectors,limit,features)
-        out=[]
-        for r in ranked:
-            fresh=await self.resolve(r["moment_id"],r["evidence_version"],quote=r["quote"])
-            if fresh:
-                out.append({**fresh,"reason":r["cue_text"],"score":1/(1+len(out))})
-                if len(out)>=limit:break
+        await self._collect_verified(ranked, out, limit)
         return out
+
+    async def _collect_verified(self, rows, out, limit):
+        seen = {row["event_id"] for row in out}
+        for row in rows:
+            event_id = row["bucket_id"]
+            if event_id in seen:
+                continue
+            fresh = await self.resolve(row["moment_id"], row["evidence_version"], quote=row["quote"])
+            if fresh and fresh["event_id"] == event_id:
+                out.append({**fresh, "reason": row["cue_text"], "score": 1 / (1 + len(out))})
+                seen.add(event_id)
+                if len(out) >= limit:
+                    break
